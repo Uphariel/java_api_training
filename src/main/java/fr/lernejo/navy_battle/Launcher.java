@@ -10,7 +10,8 @@ public class Launcher {
             int serverPort = Integer.parseInt(args[0]);
             Server server = new Server(UUID.randomUUID().toString(),"localhost:" + serverPort, "Coucou" );
             server.startServer(serverPort);
-            int poteto = 0;
+            if (args.length == 2)
+                server.sendPostRequest(args[1]);
         }
 
     }
