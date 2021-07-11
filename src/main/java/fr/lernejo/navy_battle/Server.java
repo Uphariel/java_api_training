@@ -2,82 +2,88 @@ package fr.lernejo.navy_battle;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
-import org.json.simple.JSONObject;
-import org.json.simple.parser.JSONParser;
-import org.json.simple.parser.ParseException;
+import fr.lernejo.navy_battle.game_data.*;
+import org.json.JSONObject;
 
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
+import java.util.UUID;
 import java.util.concurrent.Executors;
 
-public class Server {
-    public final String id;
-    public final String url;
-    public final String msg;
-
-    public Server(String id, String url, String msg) {
-        this.id = id;
-        this.url = url;
-        this.msg = msg;
-    }
-
-    public void startServer(int port) throws IOException {
+public class Server extends AbstractServer {
+    private final Option<GameMap> localMap = new Option<>();
+    private final Option<GameMap> remoteMap = new Option<>();
+    private final Option<ServerInfo> localServer = new Option<>();
+    private final Option<ServerInfo> remoteServer = new Option<>();
+    public void startServer(int port, String connectURL) throws IOException {
+        localServer.set(new ServerInfo(
+            UUID.randomUUID().toString(),
+            "http://localhost:" + port,
+            "OK"
+        ));
+        if (connectURL != null)
+            new Thread(() -> this.requestStart(connectURL)).start();
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
         server.setExecutor(Executors.newSingleThreadExecutor());
-        server.createContext("/ping", this::pingHandler);
-        server.createContext("/api/game/start", this::startGameHandler);
+        server.createContext("/ping", this::handlePing);
+        server.createContext("/api/game/start", s -> startGame(new RequestHandler(s)));
+        server.createContext("/api/game/fire", s -> handleFire(new RequestHandler(s)));
         server.start();
     }
-
-    private void pingHandler(HttpExchange exchange) throws IOException {
+    private void handlePing(HttpExchange exchange) throws IOException {
         String body = "OK";
         exchange.sendResponseHeaders(200, body.length());
-        try (OutputStream os = exchange.getResponseBody()) {
+        try (OutputStream os = exchange.getResponseBody()) { // (1)
             os.write(body.getBytes());
         }
     }
-
-    private void startGameHandler(HttpExchange exchange) throws IOException {
-        InputStream in = exchange.getRequestBody();
-        JSONParser jsonParser = new JSONParser();
+    public void startGame(RequestHandler handler) throws IOException {
         try {
-            JSONObject jsonObject = (JSONObject) jsonParser.parse(new InputStreamReader(in, "UTF-8"));
-            if (jsonObject.get("id") == null || jsonObject.get("url") == null || jsonObject.get("message") == null) {
-                exchange.sendResponseHeaders(400, 0);
+            remoteServer.set(ServerInfo.fromJSON(handler.getJSONObject()));
+            localMap.set(new GameMap(true));remoteMap.set(new GameMap(false));
+            System.out.println("Will fight against " + remoteServer.get().getUrl());
+            handler.sendJSON(202, localServer.get().toJSON());
+            fire();
+        } catch (Exception e) {
+            e.printStackTrace();handler.sendString(400, e.getMessage());
+        }
+    }
+    public void requestStart(String server) {
+        try {
+            localMap.set(new GameMap(true));remoteMap.set(new GameMap(false));
+            var response = sendPOSTRequest(server + "/api/game/start", this.localServer.get().toJSON());
+            this.remoteServer.set(ServerInfo.fromJSON(response).withURL(server));
+            System.out.println("Will fight against " + remoteServer.get().getUrl());
+
+        } catch (Exception e) {
+            e.printStackTrace();System.err.println("Failed to start game!");
+        }
+    }
+    public void fire() throws IOException, InterruptedException {
+        Coordinates coordinates = remoteMap.get().getNextPlaceToHit();
+        var response =
+            sendGETRequest(remoteServer.get().getUrl() + "/api/game/fire?cell=" + coordinates.toString());
+        if (!response.getBoolean("shipLeft")) {
+            return;
+        }
+        var result = FireResult.fromAPI(response.getString("consequence"));
+        if (result == FireResult.MISS)
+            remoteMap.get().setCell(coordinates, GameCell.MISSED_FIRE);
+        else
+            remoteMap.get().setCell(coordinates, GameCell.SUCCESSFUL_FIRE);
+    }
+    public void handleFire(RequestHandler handler) throws IOException {
+        try {
+            String cell = handler.getQueryParameter("cell");
+            var pos = new Coordinates(cell);var res = localMap.get().hit(pos);var response = new JSONObject();
+            response.put("consequence", res.toAPI());response.put("shipLeft", localMap.get().hasShipLeft());
+            handler.sendJSON(200, response);
+            if (localMap.get().hasShipLeft()) {
+                fire();
             }
-        } catch (ParseException e) {
-            exchange.sendResponseHeaders(400, 0);
-            e.printStackTrace();
+        } catch (Exception e) {
+            e.printStackTrace();handler.sendString(400, e.getMessage());
         }
-        sendJson(exchange);
-    }
-
-    private void sendJson(HttpExchange exchange) throws IOException {
-        exchange.getResponseHeaders().set("Content-type", "application/json");
-        String body = "{\"id\":\""+ this.id + "\", \"url\":\"" + this.url + "\", \"message\":\""+ this.msg + "\"}";
-        exchange.sendResponseHeaders(202, body.length());
-        try (OutputStream os = exchange.getResponseBody()) {
-            os.write(body.getBytes());
-        }
-        exchange.close();
-    }
-
-    public void sendPostRequest(String adversaryUrl) throws IOException, InterruptedException {
-        java.net.http.HttpClient client = HttpClient.newHttpClient();
-
-        HttpRequest postRequest = HttpRequest.newBuilder()
-            .uri(URI.create(adversaryUrl + "/api/game/start"))
-            .setHeader("Accept", "application/json")
-            .setHeader("Content-Type", "application/json")
-            .POST(HttpRequest.BodyPublishers.ofString("{\"id\":\"" + this.id + "\", \"url\":\"" + this.url + "\", \"message\":\"" + this.msg + "\"}"))
-            .build();
-        var response = client.send(postRequest, HttpResponse.BodyHandlers.ofString());
     }
 }
